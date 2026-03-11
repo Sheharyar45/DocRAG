@@ -1,0 +1,1 @@
+Here, the apiClient.ts file contains all of the code api calls that the front end will have to make. All these are tracked on the localhost port 8000.
