@@ -1,18 +1,17 @@
-# NotaRAG – AI-Powered Note Management and Semantic Search Platform
+# DocRAG – AI-Powered Note Management and Semantic Search Platform
 
-> **A student-led AI note-taking platform under [CREATE UofT](https://github.com/CREATE-UofT)**  
-> Helping students store, organize, and *intelligently* retrieve their notes using Retrieval-Augmented Generation (RAG) and semantic search.
+> Helping bussinesses store, organize, and *intelligently* retrieve their notes using Retrieval-Augmented Generation (RAG) and semantic search.
 
 ---
 
 ## 🌟 Overview
 
-**NotaRAG** is a modern web-based note-taking platform that blends **AI-powered semantic search**, **contextual retrieval**, and **RAG-based summarization** to help users easily find and interact with their notes.
+**DocRAG** is a modern web-based note-taking platform that blends **AI-powered semantic search**, **contextual retrieval**, and **RAG-based summarization** to help users easily find and interact with their notes.
 
-Unlike traditional keyword search, NotaRAG understands the *meaning* behind your queries using **vector embeddings**.  
+Unlike traditional keyword search, DocRAG understands the *meaning* behind your queries using **vector embeddings**.  
 You can ask questions like:  
 > “Find my notes about machine learning optimization techniques.”  
-and NotaRAG will return contextually relevant notes — not just text matches.
+and DocRAG will return contextually relevant notes — not just text matches.
 
 ---
 
