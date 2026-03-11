@@ -5,6 +5,8 @@ POST /api/chat/           → Global chat across all user notes
 POST /api/chat/note/{id}  → Chat scoped to a specific note
 """
 
+from typing import Optional, List
+
 from fastapi import APIRouter, Depends, HTTPException
 from database import supabase
 from deps.auth import get_current_user
@@ -93,11 +95,11 @@ async def note_chat(
 async def _run_chat_pipeline(
     query: str,
     user_id: str,
-    note_id: str | None,
-    folder_id: str | None,
+    note_id: Optional[str],
+    folder_id: Optional[str],
     search_mode: str,
     top_k: int,
-    conversation_history: list | None,
+    conversation_history: Optional[List],
 ) -> ChatResponse:
     """Shared pipeline logic for both global and note-scoped chat."""
 
