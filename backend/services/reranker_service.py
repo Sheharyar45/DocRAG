@@ -11,20 +11,14 @@ before they reach the LLM.
 
 from typing import List, Optional
 from dataclasses import dataclass
-import math
 from sentence_transformers import CrossEncoder
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Minimum relevance probability (after sigmoid).
+# Minimum relevance score (after min-max normalization, 0-1).
 # Chunks below this are considered irrelevant and dropped.
-DEFAULT_MIN_SCORE = 0.10
-
-
-def _sigmoid(x: float) -> float:
-    """Convert a raw logit to a 0-1 probability."""
-    return 1.0 / (1.0 + math.exp(-x))
+DEFAULT_MIN_SCORE = 0.05
 
 
 @dataclass
@@ -80,18 +74,29 @@ class RerankerService:
 
         # Score all pairs in one batch — returns raw logits
         raw_scores = self.model.predict(pairs, show_progress_bar=False)
+        raw_floats = [float(s) for s in raw_scores]
 
-        # Combine original results with sigmoid-normalized scores
+        # Min-max normalize raw logits to 0-1 so scores span the
+        # full range instead of clustering above 50 % (sigmoid artifact).
+        lo = min(raw_floats)
+        hi = max(raw_floats)
+        spread = hi - lo
+        if spread > 0:
+            normed = [(s - lo) / spread for s in raw_floats]
+        else:
+            # All scores identical → rank equally
+            normed = [1.0] * len(raw_floats)
+
+        # Combine original results with normalized scores
         reranked = []
-        for result, raw in zip(results, raw_scores):
-            prob = _sigmoid(float(raw))
+        for result, score in zip(results, normed):
             reranked.append(
                 RerankResult(
                     chunk_id=result.chunk_id,
                     note_id=result.note_id,
                     content=result.content,
                     original_score=result.score,
-                    rerank_score=prob,
+                    rerank_score=score,
                     metadata=result.metadata,
                 )
             )
