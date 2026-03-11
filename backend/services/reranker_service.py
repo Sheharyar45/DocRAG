@@ -4,163 +4,132 @@ Cross-encoder reranker service.
 Takes top-K candidates from hybrid search and re-scores them using
 a cross-encoder model for more accurate relevance ranking.
 
-Improvements over basic rerankers:
-- Uses raw logits (better ranking signal)
-- Supports batching
-- Device auto-detection (CPU/GPU)
-- Per-note diversity constraint
-- Safe fallback if threshold removes all results
-- Optional passage truncation for stability
+Scores are normalized via sigmoid so they sit in the 0-1 range,
+and a minimum threshold is applied to drop irrelevant chunks
+before they reach the LLM.
 """
 
 from typing import List, Optional
 from dataclasses import dataclass
+import math
 from sentence_transformers import CrossEncoder
 import logging
-import torch
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MIN_SCORE = -10.0
-DEFAULT_BATCH_SIZE = 32
-MAX_CHARS = 1500
-MAX_PER_NOTE = 2
+# Minimum relevance probability (after sigmoid).
+# Chunks below this are considered irrelevant and dropped.
+DEFAULT_MIN_SCORE = 0.10
+
+
+def _sigmoid(x: float) -> float:
+    """Convert a raw logit to a 0-1 probability."""
+    return 1.0 / (1.0 + math.exp(-x))
 
 
 @dataclass
 class RerankResult:
-    """Search result with reranker score."""
+    """A search result with an additional reranker score."""
     chunk_id: str
     note_id: str
     content: str
     original_score: float
-    rerank_score: float
+    rerank_score: float          # sigmoid-normalized, 0-1
     metadata: dict
 
 
 class RerankerService:
     """
-    Cross-encoder reranker.
-
-    Cross-encoders jointly encode (query, passage) pairs and produce
-    significantly better relevance signals than embedding similarity.
+    Reranks search results using a cross-encoder model.
+    Cross-encoders jointly encode (query, passage) pairs for
+    much more accurate relevance scores than bi-encoders.
     """
 
-    def __init__(
-        self,
-        model_name: str = "BAAI/bge-reranker-v2-m3",
-        batch_size: int = DEFAULT_BATCH_SIZE,
-    ):
+    def __init__(self, model_name: str = "BAAI/bge-reranker-v2-m3"):
         self.model_name = model_name
-        self.batch_size = batch_size
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        logger.info(f"Loading reranker model: {model_name} on {device}")
-        self.model = CrossEncoder(model_name, device=device)
+        logger.info(f"Loading reranker model: {model_name}")
+        self.model = CrossEncoder(model_name)
         logger.info("Reranker model loaded successfully")
-
-    def _truncate(self, text: str) -> str:
-        """Prevent extremely long passages from slowing reranking."""
-        if len(text) > MAX_CHARS:
-            return text[:MAX_CHARS]
-        return text
 
     def rerank(
         self,
         query: str,
-        results: list,
+        results: list,  # List[SearchResult] from vector_store_service
         top_k: int = 5,
         min_score: float = DEFAULT_MIN_SCORE,
-        max_per_note: int = MAX_PER_NOTE,
     ) -> List[RerankResult]:
         """
-        Rerank search results using cross-encoder scoring.
+        Rerank search results using the cross-encoder.
 
         Args:
-            query: User query
-            results: candidates from retrieval step
-            top_k: results to return
-            min_score: minimum reranker logit
-            max_per_note: max chunks allowed per note
+            query: The user's search query.
+            results: List of SearchResult objects from the retrieval step.
+            top_k: Number of top results to return after reranking.
+            min_score: Minimum sigmoid-normalized score (0-1). Results
+                       below this threshold are dropped entirely.
 
         Returns:
-            Top-K reranked results
+            Top-K results sorted by reranker score (descending),
+            with irrelevant results removed.
         """
-
         if not results:
             return []
 
-        logger.info(f"Reranking {len(results)} candidates")
+        # Build (query, passage) pairs for the cross-encoder
+        pairs = [(query, r.content) for r in results]
 
-        # Build input pairs
-        pairs = [(query, self._truncate(r.content)) for r in results]
+        # Score all pairs in one batch — returns raw logits
+        raw_scores = self.model.predict(pairs, show_progress_bar=False)
 
-        # Predict logits
-        raw_scores = self.model.predict(
-            pairs,
-            batch_size=self.batch_size,
-            show_progress_bar=False,
-        )
-
-        reranked: List[RerankResult] = []
-
-        for result, score in zip(results, raw_scores):
+        # Combine original results with sigmoid-normalized scores
+        reranked = []
+        for result, raw in zip(results, raw_scores):
+            prob = _sigmoid(float(raw))
             reranked.append(
                 RerankResult(
                     chunk_id=result.chunk_id,
                     note_id=result.note_id,
                     content=result.content,
                     original_score=result.score,
-                    rerank_score=float(score),
+                    rerank_score=prob,
                     metadata=result.metadata,
                 )
             )
 
-        # Sort by reranker score
+        # Sort by reranker score descending
         reranked.sort(key=lambda r: r.rerank_score, reverse=True)
 
-        # Apply score threshold
-        filtered = [r for r in reranked if r.rerank_score >= min_score]
+        # Drop anything below the minimum relevance threshold
+        before_count = len(reranked)
+        reranked = [r for r in reranked if r.rerank_score >= min_score]
 
-        if not filtered:
-            logger.warning(
-                "All results removed by threshold — falling back to retrieval ranking"
+        if before_count != len(reranked):
+            logger.info(
+                f"Threshold filter ({min_score}): {before_count} → {len(reranked)} results"
             )
-            filtered = reranked
 
-        # Enforce diversity (max chunks per note)
-        final: List[RerankResult] = []
-        note_counts = {}
+        # Always keep at least 1 result if anything survived the threshold
+        final = reranked[:top_k]
 
-        for r in filtered:
-            count = note_counts.get(r.note_id, 0)
+        if final:
+            logger.info(
+                f"Reranked {len(results)} candidates → {len(final)} returned. "
+                f"Score range: [{final[-1].rerank_score:.3f}, {final[0].rerank_score:.3f}]"
+            )
+        else:
+            logger.info(
+                f"Reranked {len(results)} candidates → 0 survived threshold {min_score}"
+            )
 
-            if count >= max_per_note:
-                continue
-
-            final.append(r)
-            note_counts[r.note_id] = count + 1
-
-            if len(final) >= top_k:
-                break
-
-        logger.info(
-            f"Rerank completed: {len(results)} → {len(final)} returned "
-            f"(score range: {final[-1].rerank_score:.2f} - {final[0].rerank_score:.2f})"
-        )
-        print(f"Final reranked results: {[f'{r.content[:50]}... ({r.rerank_score:.2f})' for r in final]}")
         return final
 
 
-# Singleton instance
+# Singleton
 _reranker_service: Optional[RerankerService] = None
 
 
 def get_reranker_service() -> RerankerService:
     global _reranker_service
-
     if _reranker_service is None:
         _reranker_service = RerankerService()
-
     return _reranker_service
